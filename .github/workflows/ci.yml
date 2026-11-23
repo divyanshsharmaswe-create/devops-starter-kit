@@ -55,19 +55,29 @@ jobs:
       - name: Image name (lowercase)
         id: meta
         run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-      - name: Build (and push on main)
+      - name: Build image
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ github.event_name == 'push' }}
-          tags: |
-            ${{ steps.meta.outputs.image }}:${{ github.sha }}
-            ${{ steps.meta.outputs.image }}:latest
+          load: true
+          tags: api:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Smoke test the image
         run: |
-          docker build -t api:ci .
           docker run -d --name api -p 8080:8080 api:ci
-          for i in $(seq 1 20); do curl -fsS localhost:8080/healthz && exit 0; sleep 1; done
+          for i in $(seq 1 20); do
+            if curl -fsS localhost:8080/healthz && curl -fsS localhost:8080/readyz; then exit 0; fi
+            sleep 1
+          done
           docker logs api; exit 1
+      - name: Push to GHCR (main only)
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ github.sha }}
+            ${{ steps.meta.outputs.image }}:latest
+          cache-from: type=gha

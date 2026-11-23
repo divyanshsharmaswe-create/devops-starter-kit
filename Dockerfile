@@ -6,7 +6,8 @@ RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt
 
 # ---- runtime stage: small, non-root, no build tools ----
 FROM python:3.12-slim
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PORT=8080
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PORT=8080 \
+    DATABASE_URL=sqlite:////tmp/app.db
 RUN useradd --create-home --uid 10001 app
 WORKDIR /srv
 COPY --from=build /wheels /wheels
