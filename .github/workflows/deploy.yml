@@ -1,0 +1,84 @@
+name: Deploy
+
+# Manual only. Skips cleanly until the cloud secrets below are configured.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Where to deploy
+        type: choice
+        options: [gcp-cloud-run, aws-ecs-fargate]
+        default: gcp-cloud-run
+
+permissions:
+  contents: read
+  id-token: write   # OIDC / Workload Identity Federation, no long-lived cloud keys
+
+jobs:
+  gcp:
+    if: inputs.target == 'gcp-cloud-run'
+    runs-on: ubuntu-latest
+    env:
+      HAS_SECRETS: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER != '' && secrets.GCP_SERVICE_ACCOUNT != '' && secrets.GCP_PROJECT_ID != '' && secrets.TF_STATE_BUCKET != '' }}
+      REGION: ${{ vars.GCP_REGION || 'asia-south1' }}
+      AR_REPO: ${{ vars.GCP_AR_REPO || 'apps' }}
+    steps:
+      - name: Check configuration
+        if: env.HAS_SECRETS != 'true'
+        run: echo "::notice::GCP secrets not configured (see README → Deploy). Skipping deploy."
+      - uses: actions/checkout@v4
+        if: env.HAS_SECRETS == 'true'
+      - uses: google-github-actions/auth@v2
+        if: env.HAS_SECRETS == 'true'
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+        if: env.HAS_SECRETS == 'true'
+      - name: Build and push to Artifact Registry
+        if: env.HAS_SECRETS == 'true'
+        id: image
+        run: |
+          IMAGE="${REGION}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${AR_REPO}/devops-starter-kit:${GITHUB_SHA}"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build -t "$IMAGE" . && docker push "$IMAGE"
+          echo "ref=$IMAGE" >> "$GITHUB_OUTPUT"
+      - uses: hashicorp/setup-terraform@v3
+        if: env.HAS_SECRETS == 'true'
+      - name: Terraform apply
+        if: env.HAS_SECRETS == 'true'
+        working-directory: infra/gcp-cloud-run
+        run: |
+          terraform init -input=false -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"
+          terraform apply -auto-approve -input=false \
+            -var="project_id=${{ secrets.GCP_PROJECT_ID }}" -var="region=${REGION}" \
+            -var="image=${{ steps.image.outputs.ref }}" -var="app_version=${GITHUB_SHA::7}"
+          echo "### Deployed: $(terraform output -raw url)" >> "$GITHUB_STEP_SUMMARY"
+
+  aws:
+    if: inputs.target == 'aws-ecs-fargate'
+    runs-on: ubuntu-latest
+    env:
+      HAS_SECRETS: ${{ secrets.AWS_ROLE_ARN != '' && secrets.TF_STATE_BUCKET_AWS != '' }}
+      AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
+    steps:
+      - name: Check configuration
+        if: env.HAS_SECRETS != 'true'
+        run: echo "::notice::AWS secrets not configured (see README → Deploy). Skipping deploy."
+      - uses: actions/checkout@v4
+        if: env.HAS_SECRETS == 'true'
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: env.HAS_SECRETS == 'true'
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: hashicorp/setup-terraform@v3
+        if: env.HAS_SECRETS == 'true'
+      - name: Terraform apply (image built by CI and pushed to GHCR)
+        if: env.HAS_SECRETS == 'true'
+        working-directory: infra/aws-ecs-fargate
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET_AWS }}" -backend-config="region=${AWS_REGION}"
+          terraform apply -auto-approve -input=false -var="region=${AWS_REGION}" \
+            -var="image=ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}" -var="app_version=${GITHUB_SHA::7}"
